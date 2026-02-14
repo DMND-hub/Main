@@ -1,0 +1,115 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import {IERC20}   from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
+/* Minimal reentrancy guard */
+abstract contract ReentrancyGuard {
+    uint256 private _status;
+    constructor() { _status = 1; }
+    modifier nonReentrant() {
+        require(_status == 1, "REENTRANCY");
+        _status = 2;
+        _;
+        _status = 1;
+    }
+}
+
+/* DMND token interface (only what Vault needs) */
+interface IDMND {
+    function totalSupply() external view returns (uint256);
+    function burnFrom(address account, uint256 amount) external;
+}
+
+/**
+ * @title DMND5Vault (USDC)
+ * @notice Holds the stable reserve and pays redemptions at the proportional floor.
+ *         - One-time link to token, then isTokenSet (no owner).
+ *         - Anytime redemption (no time gates).
+ */
+contract DMND5Vault is ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
+    event TokenLinked(address token);
+    event Redeemed(
+        address indexed account,
+        uint256 amountDMND,
+        uint256 amountUSDC,
+        uint256 newFloor1e18
+    );
+
+    IERC20 public immutable USDC;   // reserve asset
+    IDMND  public token;            // set exactly once
+    address private _authorizedSetter;
+    bool    public isTokenSet;
+
+    constructor(address usdc_) {
+        require(usdc_ != address(0), "USDC=0");
+        require(usdc_.code.length > 0, "USDC_NOT_CONTRACT");
+        USDC = IERC20(usdc_);
+        _authorizedSetter = msg.sender;
+    }
+
+    /// @notice One-time link to the DMND token, then seal permanently.
+    function setToken(address token_) external {
+        require(!isTokenSet, "Token Set");
+        require(msg.sender == _authorizedSetter, "NOT_AUTH");
+        require(address(token) == address(0), "SET_ONCE");
+        require(token_ != address(0), "TOKEN=0");
+        require(token_.code.length > 0, "TOKEN_NOT_CONTRACT");
+        
+        // Validate interface implementation
+        try IDMND(token_).totalSupply() returns (uint256) {
+            // Success - totalSupply is callable
+        } catch {
+            revert("INVALID_TOKEN");
+        }
+        
+        token = IDMND(token_);
+        isTokenSet = true;
+        _authorizedSetter = address(0);
+        emit TokenLinked(token_);
+    }
+
+    /// @notice USDC balance held by the vault.
+    function vaultBalance() public view returns (uint256) {
+        return USDC.balanceOf(address(this));
+    }
+
+    /// @notice floor1e18 = (USDC * 1e18) / totalSupply
+    function floorPerToken1e18() public view returns (uint256) {
+        uint256 ts = token.totalSupply();
+        if (ts == 0) return 0;
+        return (vaultBalance() * 1e18) / ts;
+    }
+
+    /**
+     * @notice Redeem DMND for USDC at the proportional floor.
+     *         Computes payout BEFORE burn to avoid drift: usdcOut = amount * vault / supply.
+     * @param amountDMND   DMND amount (18 decimals)
+     * @param minUSDCOut   slippage guard (USDC native decimals)
+     */
+    function redeem(uint256 amountDMND, uint256 minUSDCOut) external nonReentrant {
+        require(isTokenSet, "NOT_LINKED");
+        require(amountDMND > 0, "ZERO_AMT");
+
+        uint256 ts = token.totalSupply();
+        require(ts > 0, "NO_SUPPLY");
+
+        uint256 vaultBal = vaultBalance();
+        require(vaultBal > 0, "VAULT_EMPTY");
+
+        uint256 usdcOut = (amountDMND * vaultBal) / ts;
+        require(usdcOut > 0, "DUST_AMOUNT");
+        require(usdcOut >= minUSDCOut, "SLIPPAGE");
+
+        // Burn first (supply ↓ → floor ↑ for remaining)
+        token.burnFrom(msg.sender, amountDMND);
+
+        // Pay USDC via SafeERC20
+        USDC.safeTransfer(msg.sender, usdcOut);
+
+        emit Redeemed(msg.sender, amountDMND, usdcOut, floorPerToken1e18());
+    }
+}
