@@ -1,0 +1,261 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import {IERC20}    from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
+/* Uniswap V2 router interface (supporting fee-on-transfer tokens) */
+interface IUniswapV2Router02 {
+    function WETH() external pure returns (address);
+    function swapExactTokensForTokensSupportingFeeOnTransferTokens(
+        uint amountIn,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external;
+}
+
+/* Minimal reentrancy guard */
+abstract contract ReentrancyGuard {
+    uint256 private _status;
+    constructor() { _status = 1; }
+    modifier nonReentrant() {
+        require(_status == 1, "REENTRANCY");
+        _status = 2;
+        _;
+        _status = 1;
+    }
+}
+
+/* Optional view into the vault (not strictly required here) */
+interface IDMNDVaultView {
+    function USDC() external view returns (IERC20);
+    function floorPerToken1e18() external view returns (uint256);
+}
+
+/**
+ * @title DMND5
+ * @notice Fixed-supply ERC-20 with fee-on-transfer accruing in the contract.
+ *         Anyone can convert accrued fees → USDC via router → sent directly to the Vault.
+ *         - No owner, no upgrades.
+ *         - Fee, router, vault, paths are immutable after deploy.
+ */
+contract DMND5 is ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
+    /* ===== Events ===== */
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+    event FeesConverted(uint256 amountInDMND, uint256 amountOutUSDC);
+
+    /* ===== ERC-20 data ===== */
+    string  public name;
+    string  public symbol;
+    uint8   public constant decimals = 18;
+
+    uint256 public totalSupply;
+    mapping(address => uint256)                     public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    /* ===== Infra (immutables) ===== */
+    uint16  public immutable feeBps;        // e.g., 100 = 1% (cap enforced)
+    address public immutable vault;         // DMND1Vault
+    address public immutable router;        // Uniswap V2 router
+    address public immutable usdc;          // USDC
+    address public immutable weth;          // WETH (optional route)
+    bool    public immutable useWethRoute;  // true => DMND->WETH->USDC; false => DMND->USDC
+    uint256 public immutable minConvertAmount;
+
+    mapping(address => bool) public isFeeExempt;
+
+    address private _authorizedSetter;
+    bool    public isPairSet;
+    address public uniswapPair;
+
+    bool private _inSwap;
+    modifier swapping() {
+        require(!_inSwap, "IN_SWAP");
+        _inSwap = true;
+        _;
+        _inSwap = false;
+    }
+
+    event PairSet(address _pair);
+
+    constructor(
+        string memory _name,
+        string memory _symbol,
+        address _vault,
+        address _router,
+        address _usdc,
+        address _weth,
+        uint16  _feeBps,            // e.g., 100 = 1%; hard-cap enforced below
+        uint256 _initialSupply,     // e.g., 50_000e18
+        address _initialReceiver,
+        bool    _useWethRoute,      // set true if DMND/WETH route needed
+        uint256 _minConvertAmount   // e.g., 1e15 to avoid dust swaps
+    ) {
+        require(bytes(_name).length > 0 && bytes(_symbol).length > 0, "META");
+        require(_vault != address(0) && _router != address(0) && _usdc != address(0), "ADDR=0");
+        require(_initialReceiver != address(0), "RCVR=0");
+        require(_feeBps <= 1000, "FEE>10%");
+        require(!_useWethRoute || _weth != address(0), "WETH=0");
+
+        name    = _name;
+        symbol  = _symbol;
+        vault   = _vault;
+        router  = _router;
+        usdc    = _usdc;
+        weth    = _weth;
+        feeBps  = _feeBps;
+
+         _authorizedSetter = msg.sender;
+
+        useWethRoute     = _useWethRoute;
+        minConvertAmount = _minConvertAmount;
+
+        // Fee exemptions for internal/system addresses
+        isFeeExempt[address(this)] = true;
+        // Router exemption removed to allow sell-side fees on router-mediated sells
+        isFeeExempt[_vault]        = true;
+
+        _mint(_initialReceiver, _initialSupply);
+
+        // Approve router to pull this contract's DMND when converting fees.
+        // Casting this contract to IERC20 is valid since we implement approve/transferFrom.
+         _approve(address(this), _router, type(uint256).max);
+         
+    }
+
+
+    /// @notice One-time set pair address, then seal permanently.
+    function setPair(address _uniswapPair) external {
+        require(!isPairSet, "Pair Set");
+        require(msg.sender == _authorizedSetter, "NOT_AUTH");
+        require(uniswapPair == address(0), "SET_ONCE");
+        require(_uniswapPair != address(0), "PAIR=0");
+        require(_uniswapPair.code.length > 0, "PAIR_NOT_CONTRACT");
+        uniswapPair = _uniswapPair;
+        isPairSet = true;
+        _authorizedSetter = address(0);
+        emit PairSet(_uniswapPair);
+    }
+
+    /* ===== ERC-20 internals ===== */
+    function _mint(address to, uint256 amount) internal {
+        totalSupply += amount;
+        balanceOf[to] += amount;
+        emit Transfer(address(0), to, amount);
+    }
+
+    function _approve(address owner, address spender, uint256 amount) internal {
+        allowance[owner][spender] = amount;
+        emit Approval(owner, spender, amount);
+    }
+
+    /* ===== ERC-20 externals ===== */
+    function approve(address spender, uint256 amount) external returns (bool) {
+        _approve(msg.sender, spender, amount);
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        _transfer(msg.sender, to, amount);
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        uint256 allowed = allowance[from][msg.sender];
+        require(allowed >= amount, "ALLOWANCE");
+        if (allowed != type(uint256).max) {
+            allowance[from][msg.sender] = allowed - amount;
+            emit Approval(from, msg.sender, allowance[from][msg.sender]);
+        }
+        _transfer(from, to, amount);
+        return true;
+    }
+
+    /* ===== Fee-on-transfer core ===== */
+    function _transfer(address from, address to, uint256 amount) internal {
+        require(from != address(0) && to != address(0), "ADDR=0");
+        require(balanceOf[from] >= amount, "BAL_LOW");
+
+        uint256 sendAmount = amount;
+        // Fee applies on sells to pair: only check from exemption, ignore to exemption
+        // This allows router-mediated sells to be charged the fee
+        if (feeBps > 0 && to == uniswapPair && !isFeeExempt[from]) {
+            uint256 fee = (amount * feeBps) / 10_000;
+            sendAmount = amount - fee;
+            unchecked {
+                balanceOf[from] -= amount;
+                balanceOf[address(this)] += fee;
+                balanceOf[to] += sendAmount;
+            }
+            if (fee > 0) {
+                emit Transfer(from, address(this), fee);
+            }
+            emit Transfer(from, to, sendAmount);
+        } else {
+            unchecked {
+                balanceOf[from] -= amount;
+                balanceOf[to] += amount;
+            }
+            emit Transfer(from, to, amount);
+        }
+    }
+
+    /* ===== burnFrom for Vault redemption ===== */
+    function burnFrom(address account, uint256 amount) external {
+        uint256 allowed = allowance[account][msg.sender];
+        require(allowed >= amount, "ALLOWANCE");
+        if (allowed != type(uint256).max) {
+            allowance[account][msg.sender] = allowed - amount;
+            emit Approval(account, msg.sender, allowance[account][msg.sender]);
+        }
+        require(balanceOf[account] >= amount, "BAL_LOW");
+        unchecked {
+            balanceOf[account] -= amount;
+            totalSupply        -= amount;
+        }
+        emit Transfer(account, address(0), amount);
+    }
+
+    /* ===== Public fee conversion: DMND -> (WETH?) -> USDC -> Vault ===== */
+    function convertFeesToUSDC(uint256 minUSDCOut, uint256 deadline) external nonReentrant swapping {
+        uint256 amountIn = balanceOf[address(this)];
+        require(amountIn >= minConvertAmount, "FEES_TOO_SMALL");
+        require(deadline >= block.timestamp, "DEADLINE_PASSED");
+
+        uint256 vaultBefore = IERC20(usdc).balanceOf(vault);
+
+        if (useWethRoute) {
+            address[] memory  path = new address[](3);
+            path[0] = address(this);
+            path[1] = weth;
+            path[2] = usdc;
+            IUniswapV2Router02(router)
+                .swapExactTokensForTokensSupportingFeeOnTransferTokens(
+                    amountIn, minUSDCOut, path, vault, deadline
+                );
+        } else {
+            address[] memory  path = new address[](2);
+            path[0] = address(this);
+            path[1] = usdc;
+            IUniswapV2Router02(router)
+                .swapExactTokensForTokensSupportingFeeOnTransferTokens(
+                    amountIn, minUSDCOut, path, vault, deadline
+                );
+        }
+
+        uint256 vaultAfter = IERC20(usdc).balanceOf(vault);
+        uint256 out = vaultAfter - vaultBefore;
+        require(out > 0, "VC: no backing out");
+        emit FeesConverted(amountIn, out);
+    }
+
+    /* ===== View helper ===== */
+    function accruedFees() external view returns (uint256) {
+        return balanceOf[address(this)];
+    }
+}
