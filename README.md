@@ -28,18 +28,31 @@ Each tier represents a different balance between **liquidity, velocity, and long
 
 ## Core Thesis
 
-Fiat currencies inflate.  
+For most of modern history, money was anchored to something scarce.
+
+When convertibility to gold ended in 1971, currency shifted from being reserve-constrained to policy-driven. Scarcity became optional. Expansion became structural.
+
+Fiat currencies inflate.
+
 Scarce assets harden.
 
-Bitcoin demonstrated that **fixed supply + credible immutability** creates a new monetary class.
+Bitcoin demonstrated that fixed supply plus credible immutability can create an entirely new monetary class.
 
-The Diamond Standard (DMND protocol — DMND1 / DMND5 / DMND10) extends this idea by adding a **redeemable floor**, allowing value to harden not only through scarcity, but through **verifiable backing**.
+The Diamond Standard (DMND protocol — DMND1 / DMND5 / DMND10) extends this idea by adding a redeemable floor — allowing value to harden not only through scarcity, but through transparent, on-chain backing.
 
-No trust.  
-No discretion.  
-No governance.  
+Where Bitcoin enforces supply discipline,
 
-Only math.
+DMND introduces structural backing discipline.
+
+The floor’s intrinsic value strengthens mechanically in response to sell-side activity.
+
+No trust.
+
+No discretion.
+
+No governance.
+
+Only math and on-chain immutable code.
 
 ---
 
@@ -111,30 +124,31 @@ There are **no time locks**, **no windows**, and **no approvals required** beyon
 
 ## Floor Definition
 
-The **floor** within the DMND protocol (DMND1 / DMND5 / DMND10) is defined as: Floor per DMND = Vault USDC ÷ Total Supply
+Floor Definition
 
-Key properties:
+The floor within the DMND protocol (DMND1 / DMND5 / DMND10) is defined as: Floor per DMND = Vault USDC ÷ Total Supply
 
-- Redemption is **available at all times**
-- Redeemed tokens are burned permanently
-- Remaining supply becomes harder
-- Floor increases mechanically after every redemption
-
-There are **no time locks**, **no windows**, and **no approvals required** beyond ERC-20 allowance.
-
----
-
-## Floor Definition
-
-The **floor** within the DMND protocol (DMND1 / DMND5 / DMND10) is defined as: Floor per DMND = Vault USDC ÷ Total Supply
 
 The floor:
 
-- Is fully on-chain
-- Is independently verifiable
-- Cannot be manipulated by governance or admins
+Is fully on-chain
+Is independently verifiable
+Cannot be manipulated by governance or admins
 
-If market price ever drops below the floor, rational arbitrage incentivizes redemption.
+
+If market price ever drops below the floor, rational arbitrage incentivizes redemption
+
+
+Key properties:
+
+Redemption is available at all times
+Redeemed tokens are burned permanently
+Remaining supply becomes harder
+Floor increases mechanically after every redemption
+
+
+There are no time locks, no windows, and no approvals required beyond ERC-20 allowance.
+
 
 ---
 
