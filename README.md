@@ -139,17 +139,6 @@ Cannot be manipulated by governance or admins
 If market price ever drops below the floor, rational arbitrage incentivizes redemption
 
 
-Key properties:
-
-Redemption is available at all times
-Redeemed tokens are burned permanently
-Remaining supply becomes harder
-Floor increases mechanically after every redemption
-
-
-There are no time locks, no windows, and no approvals required beyond ERC-20 allowance.
-
-
 ---
 
 ## The Three Tiers
