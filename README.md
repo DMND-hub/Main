@@ -136,7 +136,7 @@ Is independently verifiable
 Cannot be manipulated by governance or admins
 
 
-If market price ever drops below the floor, rational arbitrage incentivizes redemption
+If market price ever drops below the floor, rational arbitrage incentivizes redemption.
 
 
 ---
